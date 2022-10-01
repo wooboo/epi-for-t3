@@ -1,6 +1,12 @@
 using epi_site1.Extensions;
 using EPiServer.Cms.Shell;
 using EPiServer.Cms.UI.AspNetIdentity;
+using EPiServer.ContentApi.Cms;
+using EPiServer.ContentApi.Core.Configuration;
+using EPiServer.ContentApi.Core.DependencyInjection;
+using EPiServer.ContentDefinitionsApi;
+using EPiServer.Framework;
+using EPiServer.OpenIDConnect;
 using EPiServer.Scheduler;
 using EPiServer.ServiceLocation;
 using EPiServer.Web.Routing;
@@ -11,6 +17,7 @@ public class Startup
 {
     private readonly IWebHostEnvironment _webHostingEnvironment;
 
+    private readonly Uri _frontendUri = new("https://localhost:5000");
     public Startup(IWebHostEnvironment webHostingEnvironment)
     {
         _webHostingEnvironment = webHostingEnvironment;
@@ -28,9 +35,49 @@ public class Startup
         services
             .AddCmsAspNetIdentity<ApplicationUser>()
             .AddCms()
-            .AddAlloy()
+            //.AddAlloy()
             .AddAdminUserRegistration()
-            .AddEmbeddedLocalization<Startup>();
+            .AddEmbeddedLocalization<Startup>()
+            .ConfigureForExternalTemplates()
+            .Configure<ExternalApplicationOptions>(options => options.OptimizeForDelivery = true);
+
+
+
+        services.AddOpenIDConnect<ApplicationUser>(
+            useDevelopmentCertificate: true,
+            signingCertificate: null,
+            encryptionCertificate: null,
+            createSchema: true,
+            options =>
+            {
+                options.RequireHttps = !_webHostingEnvironment.IsDevelopment();
+
+                options.Applications.Add(new OpenIDConnectApplication
+                {
+                    ClientId = "frontend",
+                    Scopes = { "openid", "offline_access", "profile", "email", "roles", ContentDeliveryApiOptionsDefaults.Scope },
+                    PostLogoutRedirectUris = { _frontendUri },
+                    RedirectUris =
+                    {
+                        new Uri(_frontendUri, "/login-callback"),
+                        new Uri(_frontendUri, "/login-renewal"),
+                    },
+                });
+
+                options.Applications.Add(new OpenIDConnectApplication
+                {
+                    ClientId = "cli",
+                    ClientSecret = "cli",
+                    RedirectUris = { _frontendUri },
+                    Scopes = { ContentDefinitionsApiOptionsDefaults.Scope },
+                });
+            });
+
+        services.AddOpenIDConnectUI();
+
+        services.AddContentDefinitionsApi(OpenIDConnectOptionsDefaults.AuthenticationScheme);
+        services.AddContentDeliveryApi(OpenIDConnectOptionsDefaults.AuthenticationScheme)
+            .WithFriendlyUrl();
 
         // Required by Wangkanai.Detection
         services.AddDetection();
@@ -58,10 +105,22 @@ public class Startup
         app.UseRouting();
         app.UseAuthentication();
         app.UseAuthorization();
-
+        app.UseCors();
         app.UseEndpoints(endpoints =>
         {
             endpoints.MapContent();
+        });
+
+        app.UseStatusCodePages(context =>
+        {
+            if (context.HttpContext.Response.HasStarted == false &&
+                context.HttpContext.Response.StatusCode == StatusCodes.Status404NotFound &&
+                context.HttpContext.Request.Path == "/")
+            {
+                context.HttpContext.Response.Redirect("/episerver/cms");
+            }
+
+            return Task.CompletedTask;
         });
     }
 }
